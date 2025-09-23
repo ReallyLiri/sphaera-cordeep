@@ -1,12 +1,13 @@
 # YOLOv5 🚀 by Ultralytics, GPL-3.0 license
 """
-Run inference on images, videos, directories, streams, etc.
+Run inference on images, videos, directories, streams, PDFs, etc.
 
 Usage:
     $ python path/to/detect.py \
       --source 0  # webcam
                img.jpg  # image
                vid.mp4  # video
+               document.pdf  # PDF (splits into pages)
                path/  # directory
                path/*.jpg  # glob
                'https://youtu.be/Zgi9g1ksQHc'  # YouTube
@@ -21,6 +22,9 @@ from pathlib import Path
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
+import fitz  # PyMuPDF
+from PIL import Image
+import numpy as np
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -34,6 +38,41 @@ from utils.general import (LOGGER, check_file, check_img_size, check_imshow, che
                            increment_path, non_max_suppression, print_args, scale_coords, strip_optimizer, xyxy2xywh)
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, time_sync
+
+
+def convert_pdf_to_images(pdf_path, output_dir):
+    """Convert PDF pages to images and save them to output_dir"""
+    pdf_path = Path(pdf_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    doc = fitz.open(pdf_path)
+    image_paths = []
+
+    for page_num in range(doc.page_count):
+        page = doc[page_num]
+
+        # Convert PDF page to image (300 DPI for good quality)
+        mat = fitz.Matrix(300/72, 300/72)  # 300 DPI scaling
+        pix = page.get_pixmap(matrix=mat)
+
+        # Save image with page number as filename
+        image_path = output_dir / f"{page_num + 1}.jpg"
+        pix.save(str(image_path))
+        image_paths.append(str(image_path))
+
+    doc.close()
+    return image_paths
+
+
+@torch.no_grad()
+def single_run(weights, source, imgsz, conf_thres, iou_thres, max_det, device, view_img, save_txt, save_conf,
+               save_crop, nosave, classes, agnostic_nms, augment, visualize, update, project, name, exist_ok,
+               line_thickness, hide_labels, hide_conf, half, dnn, page_num=None):
+    """Run inference on a single image file"""
+    return run(weights, source, imgsz, conf_thres, iou_thres, max_det, device, view_img, save_txt, save_conf,
+               save_crop, nosave, classes, agnostic_nms, augment, visualize, update, project, name, exist_ok,
+               line_thickness, hide_labels, hide_conf, half, dnn, page_num=page_num)
 
 
 @torch.no_grad()
@@ -62,14 +101,67 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         hide_conf=False,  # hide confidences
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
+        page_num=None,  # page number for PDF processing
         ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
-    is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
+    is_pdf = Path(source).suffix.lower() == '.pdf'
+    is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS) or is_pdf
     is_url = source.lower().startswith(('rtsp://', 'rtmp://', 'http://', 'https://'))
     webcam = source.isnumeric() or source.endswith('.txt') or (is_url and not is_file)
     if is_url and is_file:
         source = check_file(source)  # download
+
+    # Handle PDF files by converting to images
+    if is_pdf:
+        pdf_path = Path(source)
+        # Use PDF filename as base name for output directory
+        source_name = pdf_path.stem
+        temp_images_dir = increment_path(Path(project) / source_name / 'temp_images', exist_ok=exist_ok)
+
+        LOGGER.info(f'Converting PDF {pdf_path} to images...')
+        image_paths = convert_pdf_to_images(pdf_path, temp_images_dir)
+        LOGGER.info(f'Converted {len(image_paths)} pages to images')
+
+        # Process each image
+        for img_path in image_paths:
+            # Extract page number from filename for naming output
+            page_num = Path(img_path).stem
+
+            # Run detection on this single image
+            single_run(
+                weights=weights,
+                source=img_path,
+                imgsz=imgsz,
+                conf_thres=conf_thres,
+                iou_thres=iou_thres,
+                max_det=max_det,
+                device=device,
+                view_img=view_img,
+                save_txt=save_txt,
+                save_conf=save_conf,
+                save_crop=save_crop,
+                nosave=nosave,
+                classes=classes,
+                agnostic_nms=agnostic_nms,
+                augment=augment,
+                visualize=visualize,
+                update=update,
+                project=project,
+                name=source_name,
+                exist_ok=exist_ok,
+                line_thickness=line_thickness,
+                hide_labels=hide_labels,
+                hide_conf=hide_conf,
+                half=half,
+                dnn=dnn,
+                page_num=page_num
+            )
+
+        # Clean up temporary images
+        import shutil
+        shutil.rmtree(temp_images_dir)
+        return
 
     # Directories
     # Use source filename (without extension) as base name
@@ -142,8 +234,10 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                 p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
             p = Path(p)  # to Path
-            save_path = str(save_dir / p.name)  # im.jpg
-            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
+            # Use page number for PDF-derived images, otherwise use original filename
+            filename = f"{page_num}.jpg" if page_num else p.name
+            save_path = str(save_dir / filename)  # im.jpg
+            txt_path = str(save_dir / 'labels' / (page_num if page_num else p.stem)) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
             s += '%gx%g ' % im.shape[2:]  # print string
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
@@ -170,7 +264,8 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                         label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                         annotator.box_label(xyxy, label, color=colors(c, True))
                         if save_crop:
-                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                            crop_filename = f"{page_num}.jpg" if page_num else f'{p.stem}.jpg'
+                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / crop_filename, BGR=True)
 
             # Print time (inference-only)
             LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
@@ -213,7 +308,7 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
 def parse_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5_300epochs_aug.pt', help='model path(s)')
-    parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob, 0 for webcam')
+    parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob/PDF, 0 for webcam')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
