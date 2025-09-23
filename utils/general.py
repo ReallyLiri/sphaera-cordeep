@@ -21,6 +21,11 @@ from pathlib import Path
 from subprocess import check_output
 from zipfile import ZipFile
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+
 import cv2
 import numpy as np
 import pandas as pd
@@ -258,29 +263,38 @@ def check_version(current='0.0.0', minimum='0.0.0', name='version ', pinned=Fals
 
 
 @try_except
-def check_requirements(requirements=ROOT / 'requirements.txt', exclude=(), install=True):
-    # Check installed dependencies meet requirements (pass *.txt file or list of packages)
+def check_requirements(requirements=ROOT / 'pyproject.toml', exclude=(), install=True):
+    # Check installed dependencies meet requirements (pass pyproject.toml, *.txt file or list of packages)
     prefix = colorstr('red', 'bold', 'requirements:')
     check_python()  # check python version
-    if isinstance(requirements, (str, Path)):  # requirements.txt file
+    if isinstance(requirements, (str, Path)):
         file = Path(requirements)
         assert file.exists(), f"{prefix} {file.resolve()} not found, check failed."
-        with file.open() as f:
-            requirements = [f'{x.name}{x.specifier}' for x in pkg.parse_requirements(f) if x.name not in exclude]
+
+        if file.suffix == '.toml':  # pyproject.toml file
+            with file.open('rb') as f:
+                data = tomllib.load(f)
+            dependencies = data.get('project', {}).get('dependencies', [])
+            requirements = [dep for dep in dependencies if not any(excl in dep for excl in exclude)]
+        else:  # requirements.txt file
+            with file.open() as f:
+                requirements = [f'{x.name}{x.specifier}' for x in pkg.parse_requirements(f) if x.name not in exclude]
     else:  # list or tuple of packages
         requirements = [x for x in requirements if x not in exclude]
 
     n = 0  # number of packages updates
     for r in requirements:
         try:
-            pkg.require(r)
+            # Parse package name from requirement string (handle version specifiers)
+            pkg_name = r.split('>=')[0].split('==')[0].split('<')[0].split('>')[0].split('!')[0].split('~')[0]
+            pkg.require(pkg_name)
         except Exception as e:  # DistributionNotFound or VersionConflict if requirements not met
             s = f"{prefix} {r} not found and is required by YOLOv5"
             if install:
                 print(f"{s}, attempting auto-update...")
                 try:
-                    assert check_online(), f"'pip install {r}' skipped (offline)"
-                    print(check_output(f"pip install '{r}'", shell=True).decode())
+                    assert check_online(), f"'uv add {r}' skipped (offline)"
+                    print(check_output(f"uv add '{r}'", shell=True).decode())
                     n += 1
                 except Exception as e:
                     print(f'{prefix} {e}')
