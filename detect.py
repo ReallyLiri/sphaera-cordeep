@@ -155,14 +155,12 @@ def process_single_image_with_model(image_path, page_number, model, device, imgs
 
                     if save_crop:
                         c = int(cls)
-                        class_name = names[c]
+                        class_name = names[c].replace(' ', '_')
 
-                        # Initialize or increment counter for this class
                         if class_name not in crop_counters:
                             crop_counters[class_name] = 0
                         crop_counters[class_name] += 1
 
-                        # Create new filename format: <page>_<class>_<index>.jpg
                         crop_filename = f"{page_number}_{class_name}_{crop_counters[class_name]}.jpg"
                         crops_dir = save_dir / 'crops'
                         crops_dir.mkdir(parents=True, exist_ok=True)
@@ -428,14 +426,11 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                         label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                         annotator.box_label(xyxy, label, color=colors(c, True))
                         if save_crop:
-                            class_name = names[c]
+                            class_name = names[c].replace(' ', '_')
 
-                            # Initialize or increment counter for this class
                             if class_name not in crop_counters:
                                 crop_counters[class_name] = 0
                             crop_counters[class_name] += 1
-
-                            # Create filename: <page_num>_<class>_<index>.jpg OR <filename>_<class>_<index>.jpg
                             base_name = str(page_num) if page_num else p.stem
                             crop_filename = f"{base_name}_{class_name}_{crop_counters[class_name]}.jpg"
                             crops_dir = save_dir / 'crops'
