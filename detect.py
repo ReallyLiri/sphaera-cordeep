@@ -25,6 +25,12 @@ import torch.backends.cudnn as cudnn
 import fitz  # PyMuPDF
 from PIL import Image
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+import threading
+import queue
+import contextlib
+import logging
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -40,16 +46,36 @@ from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, time_sync
 
 
-def convert_pdf_to_images(pdf_path, output_dir):
-    """Convert PDF pages to images and save them to output_dir"""
-    pdf_path = Path(pdf_path)
+@contextlib.contextmanager
+def suppress_stdout_stderr():
+    """Context manager to suppress stdout, stderr, and logging"""
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        old_level = logging.getLogger().level
+
+        try:
+            sys.stdout = devnull
+            sys.stderr = devnull
+            logging.getLogger().setLevel(logging.ERROR)  # Suppress INFO/DEBUG logs
+            yield
+        finally:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+            logging.getLogger().setLevel(old_level)
+
+
+def convert_pdf_page_to_image(pdf_path, page_num, output_dir):
+    """Convert a single PDF page to an image"""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    doc = fitz.open(pdf_path)
-    image_paths = []
+    try:
+        doc = fitz.open(pdf_path)
+        if page_num >= doc.page_count:
+            doc.close()
+            raise IndexError(f"Page {page_num} does not exist in PDF with {doc.page_count} pages")
 
-    for page_num in range(doc.page_count):
         page = doc[page_num]
 
         # Convert PDF page to image (300 DPI for good quality)
@@ -59,10 +85,97 @@ def convert_pdf_to_images(pdf_path, output_dir):
         # Save image with page number as filename
         image_path = output_dir / f"{page_num + 1}.jpg"
         pix.save(str(image_path))
-        image_paths.append(str(image_path))
 
-    doc.close()
-    return image_paths
+        doc.close()
+        return str(image_path), page_num + 1
+    except Exception as e:
+        raise Exception(f"Failed to convert page {page_num}: {str(e)}")
+
+
+def extract_pdf_page(args):
+    """Extract a single PDF page to an image file"""
+    pdf_path, page_num, temp_dir = args
+
+    try:
+        image_path, page_number = convert_pdf_page_to_image(pdf_path, page_num, temp_dir)
+        return image_path, page_number, True
+    except Exception as e:
+        return None, page_num + 1, False
+
+
+def process_single_image_with_model(image_path, page_number, model, device, imgsz, conf_thres, iou_thres,
+                                  max_det, save_dir, save_txt, save_conf, save_crop, classes,
+                                  agnostic_nms, augment, visualize, line_thickness, hide_labels,
+                                  hide_conf, half, names, stride):
+    """Process a single image with an already loaded model"""
+    from utils.datasets import LoadImages
+
+    # Load single image
+    dataset = LoadImages(image_path, img_size=imgsz, stride=stride, auto=model.pt)
+
+    # Initialize crop counter for this image
+    crop_counters = {}
+
+    for path, im, im0s, vid_cap, s in dataset:
+        t1 = time_sync()
+        im = torch.from_numpy(im).to(device)
+        im = im.half() if half else im.float()
+        im /= 255
+        if len(im.shape) == 3:
+            im = im[None]
+        t2 = time_sync()
+
+        # Inference
+        pred = model(im, augment=augment, visualize=False)
+        t3 = time_sync()
+
+        # NMS
+        pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+
+        # Process predictions
+        for i, det in enumerate(pred):
+            p = Path(path)
+            filename = f"{page_number}.jpg"
+            save_path = str(save_dir / filename)
+            txt_path = str(save_dir / 'labels' / str(page_number))
+
+            gn = torch.tensor(im0s.shape)[[1, 0, 1, 0]]
+            imc = im0s.copy() if save_crop else im0s
+            annotator = Annotator(im0s, line_width=line_thickness, example=str(names))
+
+            if len(det):
+                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0s.shape).round()
+
+                for *xyxy, conf, cls in reversed(det):
+                    if save_txt:
+                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()
+                        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)
+                        with open(txt_path + '.txt', 'a') as f:
+                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+
+                    if save_crop:
+                        c = int(cls)
+                        class_name = names[c]
+
+                        # Initialize or increment counter for this class
+                        if class_name not in crop_counters:
+                            crop_counters[class_name] = 0
+                        crop_counters[class_name] += 1
+
+                        # Create new filename format: <page>_<class>_<index>.jpg
+                        crop_filename = f"{page_number}_{class_name}_{crop_counters[class_name]}.jpg"
+                        crops_dir = save_dir / 'crops'
+                        crops_dir.mkdir(parents=True, exist_ok=True)
+                        save_one_box(xyxy, imc, file=crops_dir / crop_filename, BGR=True)
+
+                    # Add bbox to image
+                    c = int(cls)
+                    label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
+                    annotator.box_label(xyxy, label, color=colors(c, True))
+
+            # Save results (always save for PDF processing)
+            im0 = annotator.result()
+            cv2.imwrite(save_path, im0)
 
 
 @torch.no_grad()
@@ -112,55 +225,105 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     if is_url and is_file:
         source = check_file(source)  # download
 
-    # Handle PDF files by converting to images
+    # Handle PDF files with concurrent page extraction and sequential inference
     if is_pdf:
         pdf_path = Path(source)
-        # Use PDF filename as base name for output directory
         source_name = pdf_path.stem
-        temp_images_dir = increment_path(Path(project) / source_name / 'temp_images', exist_ok=exist_ok)
 
-        LOGGER.info(f'Converting PDF {pdf_path} to images...')
-        image_paths = convert_pdf_to_images(pdf_path, temp_images_dir)
-        LOGGER.info(f'Converted {len(image_paths)} pages to images')
+        # Set up single base directory for everything
+        save_dir = increment_path(Path(project) / source_name, exist_ok=exist_ok)
+        temp_images_dir = save_dir / 'temp_images'
+        temp_images_dir.mkdir(parents=True, exist_ok=True)
+        (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)
 
-        # Process each image
-        for img_path in image_paths:
-            # Extract page number from filename for naming output
-            page_num = Path(img_path).stem
+        # Get total number of pages
+        doc = fitz.open(pdf_path)
+        total_pages = doc.page_count
+        doc.close()
 
-            # Run detection on this single image
-            single_run(
-                weights=weights,
-                source=img_path,
-                imgsz=imgsz,
-                conf_thres=conf_thres,
-                iou_thres=iou_thres,
-                max_det=max_det,
-                device=device,
-                view_img=view_img,
-                save_txt=save_txt,
-                save_conf=save_conf,
-                save_crop=save_crop,
-                nosave=nosave,
-                classes=classes,
-                agnostic_nms=agnostic_nms,
-                augment=augment,
-                visualize=visualize,
-                update=update,
-                project=project,
-                name=source_name,
-                exist_ok=exist_ok,
-                line_thickness=line_thickness,
-                hide_labels=hide_labels,
-                hide_conf=hide_conf,
-                half=half,
-                dnn=dnn,
-                page_num=page_num
-            )
+        from tqdm import tqdm
+        pbar = tqdm(total=total_pages, desc=f"Processing {source_name}", unit="page")
 
-        # Clean up temporary images
+        start_time = time_sync()
+
+        # Load model once for all pages (suppress initialization prints)
+        with suppress_stdout_stderr():
+            device = select_device(device)
+            model = DetectMultiBackend(weights, device=device, dnn=dnn)
+            stride, names, pt, jit, onnx, engine = model.stride, model.names, model.pt, model.jit, model.onnx, model.engine
+            imgsz = check_img_size(imgsz, s=stride)
+
+            # Half precision setup
+            half &= (pt or jit or engine) and device.type != 'cpu' and device.type != 'mps'
+            if pt or jit:
+                model.model.half() if half else model.model.float()
+
+            # Warmup model
+            model.warmup(imgsz=(1, 3, *imgsz), half=half)
+
+        # Producer-consumer pattern: concurrent extraction, sequential processing
+        image_queue = queue.Queue(maxsize=10)  # Buffer up to 10 extracted images
+        extraction_complete = threading.Event()
+
+        def extraction_worker():
+            try:
+                for page_num in range(total_pages):
+                    try:
+                        image_path, page_number = convert_pdf_page_to_image(pdf_path, page_num, temp_images_dir)
+                        image_queue.put((image_path, page_number, True))
+                    except Exception as e:
+                        LOGGER.error(f"Error extracting page {page_num + 1}: {e}")
+                        image_queue.put((None, page_num + 1, False))
+            finally:
+                extraction_complete.set()
+
+        extraction_thread = threading.Thread(target=extraction_worker)
+        extraction_thread.start()
+        successful = 0
+        processed_count = 0
+
+        while processed_count < total_pages:
+            try:
+                image_path, page_number, extraction_success = image_queue.get(timeout=30)
+                processed_count += 1
+
+                if extraction_success and image_path:
+                    try:
+                        process_single_image_with_model(
+                            image_path, page_number, model, device, imgsz, conf_thres, iou_thres,
+                            max_det, save_dir, save_txt, save_conf, save_crop, classes,
+                            agnostic_nms, augment, visualize, line_thickness, hide_labels,
+                            hide_conf, half, names, stride
+                        )
+                        successful += 1
+                        os.remove(image_path)
+
+                    except Exception as e:
+                        LOGGER.error(f"Error processing page {page_number}: {e}")
+
+                pbar.update(1)
+                image_queue.task_done()
+
+            except queue.Empty:
+                if extraction_complete.is_set():
+                    break
+                LOGGER.warning("Timeout waiting for next page")
+
+        extraction_thread.join()
+
+        pbar.close()
+
+        end_time = time_sync()
+        total_time = end_time - start_time
+        avg_time_per_page = total_time / total_pages if total_pages > 0 else 0
+
         import shutil
         shutil.rmtree(temp_images_dir)
+
+        LOGGER.info(f"Successfully processed {successful}/{total_pages} pages from {pdf_path.name}")
+        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}")
+        LOGGER.info(f"Statistics: Total time: {total_time:.1f}s, Average time per page: {avg_time_per_page:.1f}s")
+
         return
 
     # Directories
@@ -200,6 +363,7 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     # Run inference
     model.warmup(imgsz=(1, 3, *imgsz), half=half)  # warmup
     dt, seen = [0.0, 0.0, 0.0], 0
+    crop_counters = {}  # Initialize crop counters for regular processing
     for path, im, im0s, vid_cap, s in dataset:
         t1 = time_sync()
         im = torch.from_numpy(im).to(device)
@@ -264,8 +428,19 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                         label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                         annotator.box_label(xyxy, label, color=colors(c, True))
                         if save_crop:
-                            crop_filename = f"{page_num}.jpg" if page_num else f'{p.stem}.jpg'
-                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / crop_filename, BGR=True)
+                            class_name = names[c]
+
+                            # Initialize or increment counter for this class
+                            if class_name not in crop_counters:
+                                crop_counters[class_name] = 0
+                            crop_counters[class_name] += 1
+
+                            # Create filename: <page_num>_<class>_<index>.jpg OR <filename>_<class>_<index>.jpg
+                            base_name = str(page_num) if page_num else p.stem
+                            crop_filename = f"{base_name}_{class_name}_{crop_counters[class_name]}.jpg"
+                            crops_dir = save_dir / 'crops'
+                            crops_dir.mkdir(parents=True, exist_ok=True)
+                            save_one_box(xyxy, imc, file=crops_dir / crop_filename, BGR=True)
 
             # Print time (inference-only)
             LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
@@ -318,7 +493,7 @@ def parse_opt():
     parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--save-crop', default=True, action='store_true', help='save cropped prediction boxes')
-    parser.add_argument('--nosave', default=False, action='store_true', help='do not save images/videos')
+    parser.add_argument('--nosave', default=True, action='store_true', help='do not save images/videos')
     parser.add_argument('--classes', default=[0,1,2,3], nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
