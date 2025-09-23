@@ -93,11 +93,18 @@ def attempt_load(weights, map_location=None, inplace=True, fuse=True):
     # Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a
     model = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
-        ckpt = torch.load(attempt_download(w), map_location=map_location, weights_only=False)  # load
+        # Handle MPS device incompatibility with float64
+        load_device = 'cpu' if map_location and str(map_location).startswith('mps') else map_location
+        ckpt = torch.load(attempt_download(w), map_location=load_device, weights_only=False)  # load
         if fuse:
-            model.append(ckpt['ema' if ckpt.get('ema') else 'model'].float().fuse().eval())  # FP32 model
+            m = ckpt['ema' if ckpt.get('ema') else 'model'].float().fuse().eval()  # FP32 model
         else:
-            model.append(ckpt['ema' if ckpt.get('ema') else 'model'].float().eval())  # without layer fuse
+            m = ckpt['ema' if ckpt.get('ema') else 'model'].float().eval()  # without layer fuse
+
+        # Move to target device after ensuring float32
+        if map_location and str(map_location).startswith('mps'):
+            m = m.to(map_location)
+        model.append(m)
 
     # Compatibility updates
     for m in model.modules():

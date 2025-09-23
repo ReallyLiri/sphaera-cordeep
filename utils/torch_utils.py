@@ -54,17 +54,18 @@ def git_describe(path=Path(__file__).parent):  # path must be a directory
 
 
 def select_device(device='', batch_size=None, newline=True):
-    # device = 'cpu' or '0' or '0,1,2,3'
+    # device = 'cpu' or '0' or '0,1,2,3' or 'mps'
     s = f'YOLOv5 🚀 {git_describe() or date_modified()} torch {torch.__version__} '  # string
     device = str(device).strip().lower().replace('cuda:', '')  # to string, 'cuda:0' to '0'
     cpu = device == 'cpu'
+    mps = device == 'mps' and torch.backends.mps.is_available() and torch.backends.mps.is_built()
     if cpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # force torch.cuda.is_available() = False
-    elif device:  # non-cpu device requested
+    elif device and not mps:  # non-cpu, non-mps device requested
         os.environ['CUDA_VISIBLE_DEVICES'] = device  # set environment variable
         assert torch.cuda.is_available(), f'CUDA unavailable, invalid device {device} requested'  # check availability
 
-    cuda = not cpu and torch.cuda.is_available()
+    cuda = not cpu and not mps and torch.cuda.is_available()
     if cuda:
         devices = device.split(',') if device else '0'  # range(torch.cuda.device_count())  # i.e. 0,1,6,7
         n = len(devices)  # device count
@@ -74,19 +75,23 @@ def select_device(device='', batch_size=None, newline=True):
         for i, d in enumerate(devices):
             p = torch.cuda.get_device_properties(i)
             s += f"{'' if i == 0 else space}CUDA:{d} ({p.name}, {p.total_memory / 1024 ** 2:.0f}MiB)\n"  # bytes to MB
+    elif mps:
+        s += 'MPS\n'
     else:
         s += 'CPU\n'
 
     if not newline:
         s = s.rstrip()
     LOGGER.info(s.encode().decode('ascii', 'ignore') if platform.system() == 'Windows' else s)  # emoji-safe
-    return torch.device('cuda:0' if cuda else 'cpu')
+    return torch.device('cuda:0' if cuda else 'mps' if mps else 'cpu')
 
 
 def time_sync():
     # pytorch-accurate time
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+    elif torch.backends.mps.is_available():
+        torch.mps.synchronize()
     return time.time()
 
 
@@ -129,7 +134,12 @@ def profile(input, ops, n=10, device=None):
                         t[2] = float('nan')
                     tf += (t[1] - t[0]) * 1000 / n  # ms per op forward
                     tb += (t[2] - t[1]) * 1000 / n  # ms per op backward
-                mem = torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0  # (GB)
+                if torch.cuda.is_available():
+                    mem = torch.cuda.memory_reserved() / 1E9  # (GB)
+                elif torch.backends.mps.is_available():
+                    mem = torch.mps.current_allocated_memory() / 1E9  # (GB)
+                else:
+                    mem = 0  # (GB)
                 s_in = tuple(x.shape) if isinstance(x, torch.Tensor) else 'list'
                 s_out = tuple(y.shape) if isinstance(y, torch.Tensor) else 'list'
                 p = sum(list(x.numel() for x in m.parameters())) if isinstance(m, nn.Module) else 0  # parameters
