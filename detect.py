@@ -106,7 +106,7 @@ def extract_pdf_page(args):
 def process_single_image_with_model(image_path, page_number, model, device, imgsz, conf_thres, iou_thres,
                                   max_det, save_dir, save_txt, save_conf, save_crop, classes,
                                   agnostic_nms, augment, visualize, line_thickness, hide_labels,
-                                  hide_conf, half, names, stride):
+                                  hide_conf, half, names, stride, save_img=False):
     """Process a single image with an already loaded model"""
     from utils.datasets import LoadImages
 
@@ -171,9 +171,10 @@ def process_single_image_with_model(image_path, page_number, model, device, imgs
                     label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                     annotator.box_label(xyxy, label, color=colors(c, True))
 
-            # Save results (always save for PDF processing)
+            # Save results (respect save_img parameter)
             im0 = annotator.result()
-            cv2.imwrite(save_path, im0)
+            if save_img:
+                cv2.imwrite(save_path, im0)
 
 
 @torch.no_grad()
@@ -197,8 +198,8 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         view_img=False,  # show results
         save_txt=False,  # save results to *.txt
         save_conf=False,  # save confidences in --save-txt labels
-        save_crop=False,  # save cropped prediction boxes
-        nosave=False,  # do not save images/videos
+        save_crop=True,  # save cropped prediction boxes
+        nosave=True,  # do not save images/videos
         classes=None,  # filter by class: --class 0, or --class 0 2 3
         agnostic_nms=False,  # class-agnostic NMS
         augment=False,  # augmented inference
@@ -227,6 +228,7 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     if is_pdf:
         pdf_path = Path(source)
         source_name = pdf_path.stem
+        save_img = not nosave and not source.endswith('.txt')
 
         # Set up single base directory for everything
         save_dir = increment_path(Path(project) / source_name, exist_ok=exist_ok)
@@ -291,7 +293,7 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                             image_path, page_number, model, device, imgsz, conf_thres, iou_thres,
                             max_det, save_dir, save_txt, save_conf, save_crop, classes,
                             agnostic_nms, augment, visualize, line_thickness, hide_labels,
-                            hide_conf, half, names, stride
+                            hide_conf, half, names, stride, save_img
                         )
                         successful += 1
                         os.remove(image_path)
@@ -496,7 +498,7 @@ def parse_opt():
     parser.add_argument('--update', action='store_true', help='update all models')
     parser.add_argument('--project', default=ROOT / 'runs/detect', help='save results to project/name')
     parser.add_argument('--name', default='exp', help='save results to project/name')
-    parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
+    parser.add_argument('--exist-ok', default=True, action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--line-thickness', default=3, type=int, help='bounding box thickness (pixels)')
     parser.add_argument('--hide-labels', default=False, action='store_true', help='hide labels')
     parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
