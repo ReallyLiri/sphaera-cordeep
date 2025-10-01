@@ -79,7 +79,7 @@ def convert_pdf_page_to_image(pdf_path, page_num, output_dir):
         page = doc[page_num]
 
         # Convert PDF page to image (300 DPI for good quality)
-        mat = fitz.Matrix(300/72, 300/72)  # 300 DPI scaling
+        mat = fitz.Matrix(300 / 72, 300 / 72)  # 300 DPI scaling
         pix = page.get_pixmap(matrix=mat)
 
         # Save image with page number as filename
@@ -104,9 +104,9 @@ def extract_pdf_page(args):
 
 
 def process_single_image_with_model(image_path, page_number, model, device, imgsz, conf_thres, iou_thres,
-                                  max_det, save_dir, save_txt, save_conf, save_crop, classes,
-                                  agnostic_nms, augment, visualize, line_thickness, hide_labels,
-                                  hide_conf, half, names, stride, save_img=False):
+                                    max_det, save_dir, save_txt, save_conf, save_crop, classes,
+                                    agnostic_nms, augment, visualize, line_thickness, hide_labels,
+                                    hide_conf, half, names, stride, save_img=False):
     """Process a single image with an already loaded model"""
     from utils.datasets import LoadImages
 
@@ -491,7 +491,7 @@ def parse_opt():
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--save-crop', default=True, action='store_true', help='save cropped prediction boxes')
     parser.add_argument('--nosave', default=True, action='store_true', help='do not save images/videos')
-    parser.add_argument('--classes', default=[0,1,2,3], nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
+    parser.add_argument('--classes', default=[0, 1, 2, 3], nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--visualize', action='store_true', help='visualize features')
