@@ -491,7 +491,7 @@ def parse_opt():
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--save-crop', default=True, action='store_true', help='save cropped prediction boxes')
     parser.add_argument('--nosave', default=True, action='store_true', help='do not save images/videos')
-    parser.add_argument('--classes', default=[0, 1, 2, 3], nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
+    parser.add_argument('--classes', default=[0, 1, 2, 3, 4], nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3') # these translate to: [0='Content Illustration', 1='Decoration', 2='Initial', 3="Printer's Mark", 4='Table']
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--visualize', action='store_true', help='visualize features')
