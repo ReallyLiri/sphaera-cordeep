@@ -161,7 +161,7 @@ def process_single_image_with_model(image_path, page_number, model, device, imgs
                             crop_counters[class_name] = 0
                         crop_counters[class_name] += 1
 
-                        crop_filename = f"{page_number}_{class_name}_{crop_counters[class_name]}.jpg"
+                        crop_filename = f"{page_number:04d}_{class_name}_{crop_counters[class_name]:02d}.jpg"
                         crops_dir = save_dir / 'crops'
                         crops_dir.mkdir(parents=True, exist_ok=True)
                         save_one_box(xyxy, imc, file=crops_dir / crop_filename, BGR=True)
@@ -434,7 +434,10 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                                 crop_counters[class_name] = 0
                             crop_counters[class_name] += 1
                             base_name = str(page_num) if page_num else p.stem
-                            crop_filename = f"{base_name}_{class_name}_{crop_counters[class_name]}.jpg"
+                            if page_num:
+                                crop_filename = f"{int(base_name):04d}_{class_name}_{crop_counters[class_name]:02d}.jpg"
+                            else:
+                                crop_filename = f"{base_name}_{class_name}_{crop_counters[class_name]:02d}.jpg"
                             crops_dir = save_dir / 'crops'
                             crops_dir.mkdir(parents=True, exist_ok=True)
                             save_one_box(xyxy, imc, file=crops_dir / crop_filename, BGR=True)
